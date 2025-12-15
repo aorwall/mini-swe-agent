@@ -407,6 +407,10 @@ agent:
   step_limit: 250
   cost_limit: 3.
 
+run:
+  env_startup_command: |
+    which python3 >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq python3 >/dev/null 2>&1)
+
 environment:
   cwd: "/testbed"
   timeout: 60
