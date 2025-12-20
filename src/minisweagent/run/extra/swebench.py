@@ -177,7 +177,12 @@ def filter_instances(
         random.seed(42)
         random.shuffle(instances)
     before_filter = len(instances)
-    instances = [instance for instance in instances if re.match(filter_spec, instance["instance_id"])]
+    if filter_spec:
+        patterns = [p.strip() for p in filter_spec.split(",")]
+        instances = [
+            instance for instance in instances
+            if any(re.match(pattern, instance["instance_id"]) for pattern in patterns)
+        ]
     if (after_filter := len(instances)) != before_filter:
         logger.info(f"Instance filter: {before_filter} -> {after_filter} instances")
     if slice_spec:
@@ -194,7 +199,7 @@ def main(
     subset: str = typer.Option("lite", "--subset", help="SWEBench subset to use or path to a dataset", rich_help_panel="Data selection"),
     split: str = typer.Option("dev", "--split", help="Dataset split", rich_help_panel="Data selection"),
     slice_spec: str = typer.Option("", "--slice", help="Slice specification (e.g., '0:5' for first 5 instances)", rich_help_panel="Data selection"),
-    filter_spec: str = typer.Option("", "--filter", help="Filter instance IDs by regex", rich_help_panel="Data selection"),
+    filter_spec: str = typer.Option("", "--filter", help="Filter instance IDs by regex (comma-separated for multiple patterns)", rich_help_panel="Data selection"),
     shuffle: bool = typer.Option(False, "--shuffle", help="Shuffle instances", rich_help_panel="Data selection"),
     output: str = typer.Option("", "-o", "--output", help="Output directory", rich_help_panel="Basic"),
     workers: int = typer.Option(1, "-w", "--workers", help="Number of worker threads for parallel processing", rich_help_panel="Basic"),

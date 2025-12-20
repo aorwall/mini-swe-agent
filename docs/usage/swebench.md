@@ -55,7 +55,7 @@
         - `--subset` - SWEBench subset to use or path to a dataset (default: `lite`)
         - `--split` - Dataset split (default: `dev`)
         - `--slice` - Slice specification (e.g., '0:5' for first 5 instances)
-        - `--filter` - Filter instance IDs by regex
+        - `--filter` - Filter instance IDs by regex (comma-separated for multiple patterns)
         - `--shuffle` - Shuffle instances (default: `False`)
         - `--redo-existing` - Redo existing instances (default: `False`)
 
