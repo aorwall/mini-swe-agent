@@ -1,0 +1,7 @@
+# Model config for Claude Haiku 4.5 (no extended thinking)
+# Use with: mini-extra swebench --model-config models/haiku ...
+model:
+  model_name: "anthropic/claude-haiku-4-5-20251001"
+  model_kwargs:
+    drop_params: true
+    temperature: 0.0

@@ -1,0 +1,10 @@
+# Model config for Claude Haiku 4.5 with extended thinking enabled
+# Use with: mini-extra swebench --model-config models/haiku_thinking ...
+model:
+  model_name: "anthropic/claude-haiku-4-5-20251001"
+  model_kwargs:
+    drop_params: true
+    temperature: 0.0
+    thinking:
+      type: enabled
+      budget_tokens: 10000
