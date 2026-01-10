@@ -15,6 +15,7 @@ from minisweagent.run.extra.swebench import (
     get_sb_environment,
 )
 from minisweagent.utils.log import logger
+from minisweagent.utils.serialize import recursive_merge
 
 app = typer.Typer(add_completion=False)
 
@@ -28,7 +29,8 @@ def main(
     split: str = typer.Option("dev", "--split", help="Dataset split", rich_help_panel="Data selection"),
     instance_spec: str = typer.Option(0, "-i", "--instance", help="SWE-Bench instance ID or index", rich_help_panel="Data selection"),
     model_name: str | None = typer.Option(None, "-m", "--model", help="Model to use", rich_help_panel="Basic"),
-    model_class: str | None = typer.Option(None, "-c", "--model-class", help="Model class to use (e.g., 'anthropic' or 'minisweagent.models.anthropic.AnthropicModel')", rich_help_panel="Advanced"),
+    model_class: str | None = typer.Option(None, "--model-class", help="Model class to use (e.g., 'anthropic' or 'minisweagent.models.anthropic.AnthropicModel')", rich_help_panel="Advanced"),
+    model_config: Path | None = typer.Option(None, "--model-config", help="Path to a model config file to merge (overrides model settings from main config)", rich_help_panel="Advanced"),
     config_path: Path = typer.Option( builtin_config_dir / "extra" / "swebench.yaml", "-c", "--config", help="Path to a config file", rich_help_panel="Basic"),
     environment_class: str | None = typer.Option(None, "--environment-class", rich_help_panel="Advanced"),
     exit_immediately: bool = typer.Option( False, "--exit-immediately", help="Exit immediately when the agent wants to finish instead of prompting.", rich_help_panel="Basic"),
@@ -49,6 +51,14 @@ def main(
     config_path = get_config_path(config_path)
     logger.info(f"Loading agent config from '{config_path}'")
     config = yaml.safe_load(config_path.read_text())
+
+    # Merge model config if provided (allows overriding model settings without duplicating full config)
+    if model_config is not None:
+        model_config_path = get_config_path(model_config)
+        logger.info(f"Merging model config from '{model_config_path}'")
+        model_config_data = yaml.safe_load(model_config_path.read_text())
+        config = recursive_merge(config, model_config_data)
+
     if environment_class is not None:
         config.setdefault("environment", {})["environment_class"] = environment_class
     if model_class is not None:
