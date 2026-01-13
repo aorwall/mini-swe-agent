@@ -31,13 +31,8 @@ if ! head -1 "$PATCH_FILE" | grep -qE '^diff --git'; then
     exit 1
 fi
 
-# Check patch can be applied
-if ! git apply --check "$PATCH_FILE" 2>&1; then
-    echo ""
-    echo "ERROR: Patch cannot be applied cleanly."
-    echo "Fix the patch and try again."
-    exit 1
-fi
+# Check patch matches current changes (reverse apply = can unapply from current state)
+git apply --check --reverse "$PATCH_FILE" 2>&1 || exit 1
 
 # All validations passed - output patch and signal completion
 cat "$PATCH_FILE"

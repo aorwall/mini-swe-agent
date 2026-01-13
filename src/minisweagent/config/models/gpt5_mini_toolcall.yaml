@@ -1,0 +1,12 @@
+# Model config for GPT-5-mini with medium reasoning effort (using Responses API)
+# Use with: mini-extra swebench --model-config models/gpt5_mini_reasoning ...
+#
+# Uses the Responses API for better reasoning performance
+# Reasoning effort options: none, minimal, low, medium, high
+model:
+  model_class: "litellm_toolcall"
+  model_name: "openai/gpt-5-mini"
+  model_kwargs:
+    drop_params: true
+    temperature: null  # Override swebench.yaml default - not supported with reasoning
+    reasoning_effort: "medium"
