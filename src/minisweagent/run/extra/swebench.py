@@ -10,6 +10,7 @@ import re
 import threading
 import time
 import traceback
+from importlib.resources import files
 from pathlib import Path
 
 import typer
@@ -88,6 +89,14 @@ def get_sb_environment(config: dict, instance: dict) -> Environment:
         out = env.execute(startup_command)
         if out["returncode"] != 0:
             raise RuntimeError(f"Error executing startup command: {out}")
+    # Install tools if configured
+    if tools := config.get("run", {}).get("tools", []):
+        env.execute({"command": "mkdir -p /tools"})
+        for tool_name in tools:
+            tool_content = files("minisweagent.config.tools").joinpath(tool_name).read_text()
+            out = env.copy_to_container(tool_content, f"/tools/{tool_name}", executable=True)
+            if out["returncode"] != 0:
+                raise RuntimeError(f"Error installing tool {tool_name}: {out}")
     return env
 
 

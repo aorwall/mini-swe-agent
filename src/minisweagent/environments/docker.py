@@ -1,3 +1,4 @@
+import base64
 import logging
 import os
 import shlex
@@ -132,6 +133,23 @@ class DockerEnvironment:
             }
         self._check_finished(output)
         return output
+
+    def copy_to_container(self, content: str, dest_path: str, executable: bool = False) -> dict:
+        """Copy string content to a file in the container.
+
+        Args:
+            content: The file content to write
+            dest_path: Absolute path in the container
+            executable: If True, chmod +x the file after creation
+
+        Returns:
+            dict with 'output', 'returncode', 'exception_info' keys
+        """
+        encoded = base64.b64encode(content.encode()).decode()
+        cmd = f"echo {encoded} | base64 -d > {dest_path}"
+        if executable:
+            cmd += f" && chmod +x {dest_path}"
+        return self.execute({"command": cmd})
 
     def _check_finished(self, output: dict):
         """Raises Submitted exception if the output indicates task completion."""
