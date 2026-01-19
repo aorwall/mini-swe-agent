@@ -191,13 +191,20 @@ def process_instance(
 
 
 def filter_instances(
-    instances: list[dict], *, filter_spec: str, slice_spec: str = "", shuffle: bool = False
+    instances: list[dict], *, filter_spec: str, slice_spec: str = "", shuffle: bool = False, instances_file: str | None = None
 ) -> list[dict]:
     """Filter and slice a list of SWEBench instances."""
     if shuffle:
         instances = sorted(instances.copy(), key=lambda x: x["instance_id"])
         random.seed(42)
         random.shuffle(instances)
+    if instances_file:
+        allowed_ids = set(Path(instances_file).read_text().strip().splitlines())
+        allowed_ids = {id.strip() for id in allowed_ids if id.strip()}  # Remove empty lines
+        before_file_filter = len(instances)
+        instances = [instance for instance in instances if instance["instance_id"] in allowed_ids]
+        if (after_file_filter := len(instances)) != before_file_filter:
+            logger.info(f"Instance file filter: {before_file_filter} -> {after_file_filter} instances")
     before_filter = len(instances)
     instances = [instance for instance in instances if re.match(filter_spec, instance["instance_id"])]
     if (after_filter := len(instances)) != before_filter:
@@ -218,6 +225,7 @@ def main(
     slice_spec: str = typer.Option("", "--slice", help="Slice specification (e.g., '0:5' for first 5 instances)", rich_help_panel="Data selection"),
     filter_spec: str = typer.Option("", "--filter", help="Filter instance IDs by regex", rich_help_panel="Data selection"),
     shuffle: bool = typer.Option(False, "--shuffle", help="Shuffle instances", rich_help_panel="Data selection"),
+    instances_file: str | None = typer.Option(None, "--instances-file", help="Path to file containing instance IDs to run (one per line)", rich_help_panel="Data selection"),
     output: str = typer.Option("", "-o", "--output", help="Output directory", rich_help_panel="Basic"),
     workers: int = typer.Option(1, "-w", "--workers", help="Number of worker threads for parallel processing", rich_help_panel="Basic"),
     model: str | None = typer.Option(None, "-m", "--model", help="Model to use", rich_help_panel="Basic"),
@@ -236,7 +244,7 @@ def main(
     logger.info(f"Loading dataset {dataset_path}, split {split}...")
     instances = list(load_dataset(dataset_path, split=split))
 
-    instances = filter_instances(instances, filter_spec=filter_spec, slice_spec=slice_spec, shuffle=shuffle)
+    instances = filter_instances(instances, filter_spec=filter_spec, slice_spec=slice_spec, shuffle=shuffle, instances_file=instances_file)
     if not redo_existing and (output_path / "preds.json").exists():
         existing_instances = list(json.loads((output_path / "preds.json").read_text()).keys())
         logger.info(f"Skipping {len(existing_instances)} existing instances")
