@@ -132,6 +132,28 @@ def remove_from_preds_file(output_path: Path, instance_id: str):
             output_path.write_text(json.dumps(output_data, indent=2))
 
 
+def recover_from_trajectories(output_dir: Path, model_name: str) -> dict[str, str]:
+    """Scan trajectory files and recover valid submissions.
+
+    Returns dict of {instance_id: submission} for successfully completed instances.
+    """
+    recovered = {}
+    for traj_path in output_dir.glob("*/*.traj.json"):
+        try:
+            data = json.loads(traj_path.read_text())
+            info = data.get("info", {})
+            instance_id = data.get("instance_id")
+            exit_status = info.get("exit_status")
+            submission = info.get("submission")
+
+            if instance_id and exit_status == "Submitted" and submission:
+                recovered[instance_id] = submission
+                update_preds_file(output_dir / "preds.json", instance_id, model_name, submission)
+        except (json.JSONDecodeError, KeyError):
+            continue
+    return recovered
+
+
 def process_instance(
     instance: dict,
     output_dir: Path,
@@ -237,11 +259,6 @@ def main(
     instances = list(load_dataset(dataset_path, split=split))
 
     instances = filter_instances(instances, filter_spec=filter_spec, slice_spec=slice_spec, shuffle=shuffle)
-    if not redo_existing and (output_path / "preds.json").exists():
-        existing_instances = list(json.loads((output_path / "preds.json").read_text()).keys())
-        logger.info(f"Skipping {len(existing_instances)} existing instances")
-        instances = [instance for instance in instances if instance["instance_id"] not in existing_instances]
-    logger.info(f"Running on {len(instances)} instances...")
 
     logger.info(f"Building agent config from specs: {config_spec}")
     configs = [get_config_from_spec(spec) for spec in config_spec]
@@ -250,6 +267,22 @@ def main(
         "model": {"model_name": model or UNSET, "model_class": model_class or UNSET},
     })
     config = recursive_merge(*configs)
+
+    if not redo_existing:
+        existing_instances: set[str] = set()
+        if (output_path / "preds.json").exists():
+            existing_instances.update(json.loads((output_path / "preds.json").read_text()).keys())
+        # Recover valid submissions from trajectory files not in preds.json
+        model_name = config.get("model", {}).get("model_name", "unknown")
+        recovered = recover_from_trajectories(output_path, model_name)
+        new_recoveries = set(recovered.keys()) - existing_instances
+        if new_recoveries:
+            logger.info(f"Recovered {len(new_recoveries)} submissions from existing trajectory files")
+        existing_instances.update(recovered.keys())
+        if existing_instances:
+            logger.info(f"Skipping {len(existing_instances)} existing instances")
+            instances = [instance for instance in instances if instance["instance_id"] not in existing_instances]
+    logger.info(f"Running on {len(instances)} instances...")
 
     progress_manager = RunBatchProgressManager(len(instances), output_path / f"exit_statuses_{time.time()}.yaml")
 
