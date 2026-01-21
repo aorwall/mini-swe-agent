@@ -40,14 +40,25 @@ def _prepare_messages_for_api(messages: list[dict]) -> list[dict]:
 
     - Strips the 'extra' key from messages (internal metadata not sent to API)
     - Reorders thinking blocks so they are not the final block in assistant messages
-      (Anthropic API requirement)
+      (Anthropic API requirement) - but ONLY for non-latest assistant messages
     - Handles cases where thinking_blocks are stored separately from content
+
+    Note: The latest assistant message's thinking blocks cannot be modified per
+    Anthropic API requirements. We only process older assistant messages.
     """
+    # Find the index of the last assistant message (we must not modify its thinking blocks)
+    last_assistant_idx = None
+    for i in range(len(messages) - 1, -1, -1):
+        if messages[i].get("role") == "assistant":
+            last_assistant_idx = i
+            break
+
     result = []
-    for msg in messages:
+    for i, msg in enumerate(messages):
         msg_copy = {k: v for k, v in msg.items() if k != "extra"}
 
-        if msg_copy.get("role") == "assistant":
+        # Only process assistant messages that are NOT the latest one
+        if msg_copy.get("role") == "assistant" and i != last_assistant_idx:
             content = msg_copy.get("content")
             thinking_blocks_field = msg_copy.get("thinking_blocks", [])
 
