@@ -26,6 +26,53 @@ from minisweagent.models.utils.openai_multimodal import expand_multimodal_conten
 logger = logging.getLogger("litellm_model")
 
 
+def _is_thinking_block(block) -> bool:
+    """Check if a content block is a thinking-type block."""
+    if not isinstance(block, dict):
+        return False
+    block_type = block.get("type")
+    # Handle both "thinking" and "redacted_thinking" block types
+    return block_type in ("thinking", "redacted_thinking")
+
+
+def _prepare_messages_for_api(messages: list[dict]) -> list[dict]:
+    """Prepare messages for the API.
+
+    - Strips the 'extra' key from messages (internal metadata not sent to API)
+    - Reorders thinking blocks so they are not the final block in assistant messages
+      (Anthropic API requirement)
+    - Handles cases where thinking_blocks are stored separately from content
+    """
+    result = []
+    for msg in messages:
+        msg_copy = {k: v for k, v in msg.items() if k != "extra"}
+
+        if msg_copy.get("role") == "assistant":
+            content = msg_copy.get("content")
+            thinking_blocks_field = msg_copy.get("thinking_blocks", [])
+
+            # Case 1: content is a list - check for thinking blocks in content
+            if isinstance(content, list):
+                thinking_blocks = [b for b in content if _is_thinking_block(b)]
+                if thinking_blocks:
+                    other_blocks = [b for b in content if not _is_thinking_block(b)]
+                    if other_blocks:
+                        # Reorder: thinking blocks first, then other blocks
+                        msg_copy["content"] = thinking_blocks + other_blocks
+                    else:
+                        # Only thinking blocks - add empty text block
+                        msg_copy["content"] = thinking_blocks + [{"type": "text", "text": ""}]
+
+            # Case 2: content is null/empty but thinking_blocks field exists
+            # This happens when the model returns only thinking with no text/tool_calls
+            elif not content and thinking_blocks_field:
+                # Build content from thinking_blocks and add empty text block
+                msg_copy["content"] = thinking_blocks_field + [{"type": "text", "text": ""}]
+
+        result.append(msg_copy)
+    return result
+
+
 class LitellmModelConfig(BaseModel):
     model_name: str
     model_kwargs: dict[str, Any] = {}
@@ -84,7 +131,7 @@ class LitellmModel:
     def query(self, messages: list[dict[str, str]], **kwargs) -> dict:
         if self.config.set_cache_control:  # anthropic only
             messages = set_cache_control(messages, mode=self.config.set_cache_control)
-        response = self._query([{k: v for k, v in msg.items() if k != "extra"} for msg in messages], **kwargs)
+        response = self._query(_prepare_messages_for_api(messages), **kwargs)
         cost_output = self._calculate_cost(response)
         GLOBAL_MODEL_STATS.add(cost_output["cost"])
         message = response.choices[0].message.model_dump()
