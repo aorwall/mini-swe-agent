@@ -29,25 +29,7 @@ You can override the default entry point by setting the `MSWEA_DEFAULT_RUN` envi
 
 ## Hello world
 
-```python
-import logging
-
-from minisweagent.agents.default import DefaultAgent
-from minisweagent.models import get_model
-from minisweagent.environments.local import LocalEnvironment
-
-logging.basicConfig(level=logging.DEBUG)
-task = "Write a hello world program"
-model_name = "anthropic/claude-sonnet-4-5-20250929"
-
-agent = DefaultAgent(
-    get_model(input_model_name=model_name),
-    LocalEnvironment(),
-)
-
-# Run the agent
-agent.run(task)
-```
+See [Python bindings](../usage/python_bindings.md) for the most basic example.
 
 ## Mix & match
 
@@ -64,22 +46,6 @@ agent.run(task)
 
     agent = DefaultAgent(
         get_model(input_model_name=model_name),
-        LocalEnvironment(),
-    )
-    agent.run(task)
-    ```
-
-=== "Hello world (Anthropic)"
-
-    ```python
-    from minisweagent.agents.default import DefaultAgent
-    from minisweagent.models.anthropic_model import AnthropicModel
-    from minisweagent.environments.local import LocalEnvironment
-
-    model_name = "anthropic/claude-sonnet-4-5-20250929"
-
-    agent = DefaultAgent(
-        AnthropicModel(model_name=model_name),
         LocalEnvironment(),
     )
     agent.run(task)
@@ -148,7 +114,7 @@ agent.run(task)
     from minisweagent.environments.local import LocalEnvironment
 
     agent = InteractiveAgent(
-        LitellmModel(model_name=model_name),
+        get_model(input_model_name=model_name),
         LocalEnvironment(),
     )
     ```
@@ -161,7 +127,7 @@ agent.run(task)
     from minisweagent.environments.local import LocalEnvironment
 
     agent = TextualAgent(
-        LitellmModel(model_name=model_name),
+        get_model(input_model_name=model_name),
         LocalEnvironment(),
     )
     ```
@@ -184,11 +150,16 @@ An agent that uses python function for some actions:
         return {"output": "..."}
 
     class AgentWithPythonFunctions(DefaultAgent):
-        def execute_action(self, action: dict) -> dict:
-            if action["action"].startswith("python_function"):
-                args = shlex.split(action["action"].removeprefix("python_function").strip())
-                return python_function(*args)
-            return super().execute_action(action)
+        def execute_actions(self, message: dict) -> list[dict]:
+            for action in message.get("extra", {}).get("actions", []):
+                command = action.get("command", "")
+                if command.startswith("python_function"):
+                    args = shlex.split(command.removeprefix("python_function").strip())
+                    return self.add_messages(self.model.format_observation_messages(
+                        message, [python_function(*args)], self.get_template_vars()
+                    ))
+            # everything else works as usual
+            return super().execute_actions(message)
     ```
 
 
@@ -196,6 +167,7 @@ An agent that uses python function for some actions:
 
     ```python
     from minisweagent.agents.default import DefaultAgent
+    from minisweagent.environments.local import LocalEnvironment
     import shlex
 
     def python_function(*args) -> dict:
@@ -203,11 +175,13 @@ An agent that uses python function for some actions:
         return {"output": "..."}
 
     class EnvironmentWithPythonFunctions(LocalEnvironment):
-        def execute(self, command: str, cwd: str = "") -> dict:
+        def execute(self, action: dict, cwd: str = "") -> dict:
+            command = action.get("command", "")
             if command.startswith("python_function"):
                 args = shlex.split(command.removeprefix("python_function").strip())
                 return python_function(*args)
-            return super().execute(command, cwd)
+            # all other commands are executed as usual
+            return super().execute(action, cwd)
 
     agent = DefaultAgent(
         LitellmModel(model_name=model_name),
@@ -224,12 +198,17 @@ An agent that exits when the `submit` command is issued:
     from minisweagent.exceptions import Submitted
 
     class AgentQuitsOnSubmit(DefaultAgent):
-        def execute_action(self, action: dict) -> dict:
-            if action["action"] == "submit":
-                # The `Submitted` exception will be caught by the agent and
-                # the final output will be printed.
-                raise Submitted("The agent has finished its task.")
-            return super().execute_action(action)
+        def execute_actions(self, message: dict) -> list[dict]:
+            for action in message.get("extra", {}).get("actions", []):
+                if action.get("command", "") == "submit":
+                    # The `Submitted` exception will be caught by the agent and
+                    # the final output will be printed.
+                    raise Submitted({
+                        "role": "exit",
+                        "content": "The agent has finished its task.",
+                        "extra": {"exit_status": "Submitted", "submission": ""},
+                    })
+            return super().execute_actions(message)
     ```
 
 === "Subclassing the environment"
@@ -240,10 +219,14 @@ An agent that exits when the `submit` command is issued:
     from minisweagent.exceptions import Submitted
 
     class EnvironmentQuitsOnSubmit(LocalEnvironment):
-        def execute(self, command: str, cwd: str = "") -> dict:
-            if command == "submit":
-                raise Submitted("The agent has finished its task.")
-            return super().execute(command, cwd)
+        def execute(self, action: dict, cwd: str = "") -> dict:
+            if action.get("command", "") == "submit":
+                raise Submitted({
+                    "role": "exit",
+                    "content": "The agent has finished its task.",
+                    "extra": {"exit_status": "Submitted", "submission": ""},
+                })
+            return super().execute(action, cwd)
 
     agent = DefaultAgent(
         LitellmModel(model_name=model_name),
@@ -258,13 +241,11 @@ An agent that validates actions before execution (also an example of how to use 
 
     ```python
     import re
-    from dataclasses import dataclass
-    from minisweagent.agents.default import (
-        DefaultAgent, NonTerminatingException, DefaultAgentConfig
-    )
+    from minisweagent.agents.default import DefaultAgent, AgentConfig
+    from minisweagent.exceptions import FormatError
+    from pydantic import BaseModel
 
-    @dataclass
-    class ValidatingAgentConfig(DefaultAgentConfig):
+    class ValidatingAgentConfig(AgentConfig):
         forbidden_patterns: list[str] = [
             r"rm -rf /",
             r"sudo.*passwd",
@@ -275,24 +256,25 @@ An agent that validates actions before execution (also an example of how to use 
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs, config_class=ValidatingAgentConfig)
 
-        def execute_action(self, action: dict) -> dict:
-            for pattern in self.config.forbidden_patterns:
-                if re.search(pattern, action["action"], re.IGNORECASE):
-                    raise NonTerminatingException("Action blocked")
-            return super().execute_action(action)
+        def execute_actions(self, message: dict) -> list[dict]:
+            for action in message.get("extra", {}).get("actions", []):
+                command = action.get("command", "")
+                for pattern in self.config.forbidden_patterns:
+                    if re.search(pattern, command, re.IGNORECASE):
+                        raise FormatError(self.model.format_message(
+                            role="user", content="Action blocked: forbidden pattern detected"
+                        ))
+            return super().execute_actions(message)
     ```
 
 === "Subclassing the environment"
 
     ```python
     import re
-    from dataclasses import dataclass
-    from minisweagent.agents.default import (
-        DefaultAgent, NonTerminatingException, DefaultAgentConfig
-    )
-    from minisweagent.environments.local import LocalEnvironment
+    from minisweagent.agents.default import DefaultAgent
+    from minisweagent.environments.local import LocalEnvironment, LocalEnvironmentConfig
+    from minisweagent.models.litellm_model import LitellmModel
 
-    @dataclass
     class EnvironmentWithForbiddenPatternsConfig(LocalEnvironmentConfig):
         forbidden_patterns: list[str] = [
             r"rm -rf /",
@@ -304,11 +286,12 @@ An agent that validates actions before execution (also an example of how to use 
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs, config_class=EnvironmentWithForbiddenPatternsConfig)
 
-        def execute(self, command: str, cwd: str = "") -> dict:
+        def execute(self, action: dict, cwd: str = "") -> dict:
+            command = action.get("command", "")
             for pattern in self.config.forbidden_patterns:
                 if re.search(pattern, command, re.IGNORECASE):
-                    raise NonTerminatingException("Action blocked")
-            return super().execute(command, cwd)
+                    return {"output": "Action blocked: forbidden pattern detected", "returncode": 1}
+            return super().execute(action, cwd)
 
     agent = DefaultAgent(
         LitellmModel(model_name=model_name),

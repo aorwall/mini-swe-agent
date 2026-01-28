@@ -1,22 +1,14 @@
 import logging
-import re
 import time
 from collections.abc import Callable
 
 import litellm
-from jinja2 import StrictUndefined, Template
-from tenacity import (
-    before_sleep_log,
-    retry,
-    retry_if_not_exception_type,
-    stop_after_attempt,
-    wait_exponential,
-)
 
-from minisweagent.exceptions import FormatError
 from minisweagent.models import GLOBAL_MODEL_STATS
 from minisweagent.models.litellm_model import LitellmModel, LitellmModelConfig
-from minisweagent.models.utils.openai_response_api import coerce_responses_text
+from minisweagent.models.utils.actions_text import parse_regex_actions
+from minisweagent.models.utils.openai_response_api import _coerce_responses_text
+from minisweagent.models.utils.retry import retry
 
 logger = logging.getLogger("litellm_response_api_model")
 
@@ -30,30 +22,11 @@ class LitellmResponseAPIModel(LitellmModel):
         super().__init__(config_class=config_class, **kwargs)
         self._previous_response_id: str | None = None
 
-    @retry(
-        reraise=True,
-        stop=stop_after_attempt(10),
-        wait=wait_exponential(multiplier=1, min=4, max=60),
-        before_sleep=before_sleep_log(logger, logging.WARNING),
-        retry=retry_if_not_exception_type(
-            (
-                litellm.exceptions.UnsupportedParamsError,
-                litellm.exceptions.NotFoundError,
-                litellm.exceptions.PermissionDeniedError,
-                litellm.exceptions.ContextWindowExceededError,
-                litellm.exceptions.APIError,
-                litellm.exceptions.AuthenticationError,
-                KeyboardInterrupt,
-            )
-        ),
-    )
     def _query(self, messages: list[dict[str, str]], **kwargs):
         try:
-            # Remove 'extra' field - not supported by OpenAI responses API
-            clean_messages = [{k: v for k, v in msg.items() if k != "extra"} for msg in messages]
             resp = litellm.responses(
                 model=self.config.model_name,
-                input=clean_messages if self._previous_response_id is None else clean_messages[-1:],
+                input=messages if self._previous_response_id is None else messages[-1:],
                 previous_response_id=self._previous_response_id,
                 **(self.config.model_kwargs | kwargs),
             )
@@ -64,40 +37,25 @@ class LitellmResponseAPIModel(LitellmModel):
             raise e
 
     def query(self, messages: list[dict[str, str]], **kwargs) -> dict:
-        response = self._query(messages, **kwargs)
-        content = coerce_responses_text(response)
+        for attempt in retry(logger=logger, abort_exceptions=self.abort_exceptions):
+            with attempt:
+                response = self._query(self._prepare_messages_for_api(messages), **kwargs)
         cost_output = self._calculate_cost(response)
         GLOBAL_MODEL_STATS.add(cost_output["cost"])
-        return {
-            "role": "assistant",
-            "content": content,
-            "extra": {
-                "actions": self.parse_actions(response),
-                "response": response.model_dump() if hasattr(response, "model_dump") else {},
-                **cost_output,
-                "timestamp": time.time(),
-            },
+        message = response.model_dump() if hasattr(response, "model_dump") else dict(response)
+        message["extra"] = {
+            "actions": self._parse_actions(response),
+            **cost_output,
+            "timestamp": time.time(),
         }
+        return message
 
-    def parse_actions(self, response) -> list[dict]:
+    def _parse_actions(self, response) -> list[dict]:
         """Parse actions from the response API response. Uses coerce_responses_text for content extraction."""
-        content = coerce_responses_text(response)
-        actions = [a.strip() for a in re.findall(self.config.action_regex, content, re.DOTALL)]
-        if len(actions) != 1:
-            raise FormatError(
-                {
-                    "role": "user",
-                    "content": Template(self.config.format_error_template, undefined=StrictUndefined).render(
-                        actions=actions
-                    ),
-                    "extra": {
-                        "interrupt_type": "FormatError",
-                        "n_actions": len(actions),
-                        "model_response": content,
-                    },
-                }
-            )
-        return [{"command": action} for action in actions]
+        content = _coerce_responses_text(response)
+        return parse_regex_actions(
+            content, action_regex=self.config.action_regex, format_error_template=self.config.format_error_template
+        )
 
     def _calculate_cost(self, response) -> dict[str, float]:
         try:

@@ -13,7 +13,6 @@ import traceback
 from pathlib import Path
 
 import typer
-from datasets import load_dataset
 from jinja2 import StrictUndefined, Template
 from rich.live import Live
 
@@ -22,7 +21,7 @@ from minisweagent.agents.default import DefaultAgent
 from minisweagent.config import builtin_config_dir, get_config_from_spec
 from minisweagent.environments import get_environment
 from minisweagent.models import get_model
-from minisweagent.run.extra.utils.batch_progress import RunBatchProgressManager
+from minisweagent.run.benchmarks.utils.batch_progress import RunBatchProgressManager
 from minisweagent.utils.log import add_file_handler, logger
 from minisweagent.utils.serialize import UNSET, recursive_merge
 
@@ -49,7 +48,7 @@ Examples:
 [bold green]-c swebench.yaml -c agent.max_iterations=50[/bold green]
 """
 
-DEFAULT_CONFIG_FILE = builtin_config_dir / "extra" / "swebench.yaml"
+DEFAULT_CONFIG_FILE = builtin_config_dir / "benchmarks" / "swebench.yaml"
 
 DATASET_MAPPING = {
     "full": "princeton-nlp/SWE-Bench",
@@ -153,7 +152,7 @@ def process_instance(
     agent = None
     exit_status = None
     result = None
-    extra_info = None
+    extra_info = {}
 
     try:
         env = get_sb_environment(config, instance)
@@ -169,8 +168,8 @@ def process_instance(
         result = info.get("submission")
     except Exception as e:
         logger.error(f"Error processing instance {instance_id}: {e}", exc_info=True)
-        exit_status, result = type(e).__name__, str(e)
-        extra_info = {"traceback": traceback.format_exc()}
+        exit_status, result = type(e).__name__, ""
+        extra_info = {"traceback": traceback.format_exc(), "exception_str": str(e)}
     finally:
         if agent is not None:
             traj_path = instance_dir / f"{instance_id}.traj.json"
@@ -180,7 +179,7 @@ def process_instance(
                     "info": {
                         "exit_status": exit_status,
                         "submission": result,
-                        **(extra_info or {}),
+                        **extra_info,
                     },
                     "instance_id": instance_id,
                 },
@@ -239,6 +238,8 @@ def main(
     output_path.mkdir(parents=True, exist_ok=True)
     logger.info(f"Results will be saved to {output_path}")
     add_file_handler(output_path / "minisweagent.log")
+
+    from datasets import load_dataset
 
     dataset_path = DATASET_MAPPING.get(subset, subset)
     logger.info(f"Loading dataset {dataset_path}, split {split}...")

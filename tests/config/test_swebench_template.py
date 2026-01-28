@@ -19,7 +19,9 @@ class MockOutput:
 def test_observation_template_short_output():
     """Test that short output (< 10000 chars) is displayed in full"""
     # Load the swebench config
-    config_path = Path(__file__).parent.parent.parent / "src" / "minisweagent" / "config" / "extra" / "swebench.yaml"
+    config_path = (
+        Path(__file__).parent.parent.parent / "src" / "minisweagent" / "config" / "benchmarks" / "swebench.yaml"
+    )
     with open(config_path) as f:
         config = yaml.safe_load(f)
 
@@ -50,7 +52,9 @@ def test_observation_template_short_output():
 def test_observation_template_long_output():
     """Test that long output (> 10000 chars) is truncated with head/tail format"""
     # Load the swebench config
-    config_path = Path(__file__).parent.parent.parent / "src" / "minisweagent" / "config" / "extra" / "swebench.yaml"
+    config_path = (
+        Path(__file__).parent.parent.parent / "src" / "minisweagent" / "config" / "benchmarks" / "swebench.yaml"
+    )
     with open(config_path) as f:
         config = yaml.safe_load(f)
 
@@ -95,7 +99,9 @@ def test_observation_template_long_output():
 def test_observation_template_edge_case_exactly_10000_chars():
     """Test the boundary case where output is around 10000 characters"""
     # Load the swebench config
-    config_path = Path(__file__).parent.parent.parent / "src" / "minisweagent" / "config" / "extra" / "swebench.yaml"
+    config_path = (
+        Path(__file__).parent.parent.parent / "src" / "minisweagent" / "config" / "benchmarks" / "swebench.yaml"
+    )
     with open(config_path) as f:
         config = yaml.safe_load(f)
 
@@ -121,7 +127,9 @@ def test_observation_template_edge_case_exactly_10000_chars():
 def test_observation_template_just_under_10000_chars():
     """Test that smaller output shows full output without truncation"""
     # Load the swebench config
-    config_path = Path(__file__).parent.parent.parent / "src" / "minisweagent" / "config" / "extra" / "swebench.yaml"
+    config_path = (
+        Path(__file__).parent.parent.parent / "src" / "minisweagent" / "config" / "benchmarks" / "swebench.yaml"
+    )
     with open(config_path) as f:
         config = yaml.safe_load(f)
 
@@ -151,41 +159,3 @@ def test_agent_config_requires_templates():
     # AgentConfig should require all template fields now (Pydantic raises ValidationError)
     with pytest.raises(ValidationError, match="validation error"):
         AgentConfig()
-
-
-def test_exception_info_template():
-    """Test that config files have observation_template with exception handling"""
-    from pathlib import Path
-
-    import yaml
-
-    config_files = [
-        Path("src/minisweagent/config/default.yaml"),
-        Path("src/minisweagent/config/mini.yaml"),
-        Path("src/minisweagent/config/github_issue.yaml"),
-        Path("src/minisweagent/config/extra/swebench.yaml"),
-        Path("src/minisweagent/config/extra/swebench_xml.yaml"),
-        Path("src/minisweagent/config/extra/swebench_roulette.yaml"),
-    ]
-
-    for config_file in config_files:
-        with open(config_file) as f:
-            config = yaml.safe_load(f)
-
-        action_template = config.get("model", {}).get("observation_template")
-        assert action_template is not None, f"{config_file} missing observation_template in model section"
-
-        # Verify it handles exception_info
-        template = Template(action_template, undefined=StrictUndefined)
-
-        # Test with exception
-        output_with_exception = MockOutput(
-            returncode=-1, output="partial output", exception_info="Command timed out after 30s"
-        )
-        result = template.render(output=output_with_exception)
-        assert "Command timed out after 30s" in result, f"{config_file} doesn't render exception_info"
-
-        # Test without exception (should not error)
-        output_normal = MockOutput(returncode=0, output="success", exception_info="")
-        result = template.render(output=output_normal)
-        assert "success" in result

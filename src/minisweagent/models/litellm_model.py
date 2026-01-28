@@ -1,35 +1,31 @@
 import json
 import logging
 import os
-import re
 import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal
 
 import litellm
-from jinja2 import StrictUndefined, Template
 from pydantic import BaseModel
-from tenacity import (
-    before_sleep_log,
-    retry,
-    retry_if_not_exception_type,
-    stop_after_attempt,
-    wait_exponential,
-)
 
-from minisweagent.exceptions import FormatError
 from minisweagent.models import GLOBAL_MODEL_STATS
+from minisweagent.models.utils.actions_text import format_observation_messages, parse_regex_actions
+from minisweagent.models.utils.anthropic_utils import _reorder_anthropic_thinking_blocks
 from minisweagent.models.utils.cache_control import set_cache_control
 from minisweagent.models.utils.openai_multimodal import expand_multimodal_content
+from minisweagent.models.utils.retry import retry
 
 logger = logging.getLogger("litellm_model")
 
 
 class LitellmModelConfig(BaseModel):
     model_name: str
+    """Model name. Highly recommended to include the provider in the model name, e.g., `anthropic/claude-sonnet-4-5-20250929`."""
     model_kwargs: dict[str, Any] = {}
+    """Additional arguments passed to the API."""
     litellm_model_registry: Path | str | None = os.getenv("LITELLM_MODEL_REGISTRY_PATH")
+    """Model registry for cost tracking and model metadata. See the local model guide (https://mini-swe-agent.com/latest/models/local_models/) for more details."""
     set_cache_control: Literal["default_end"] | None = None
     """Set explicit cache control markers, for example for Anthropic models"""
     cost_tracking: Literal["default", "ignore_errors"] = os.getenv("MSWEA_COST_TRACKING", "default")
@@ -50,28 +46,21 @@ class LitellmModelConfig(BaseModel):
 
 
 class LitellmModel:
+    abort_exceptions: list[type[Exception]] = [
+        litellm.exceptions.UnsupportedParamsError,
+        litellm.exceptions.NotFoundError,
+        litellm.exceptions.PermissionDeniedError,
+        litellm.exceptions.ContextWindowExceededError,
+        litellm.exceptions.APIError,
+        litellm.exceptions.AuthenticationError,
+        KeyboardInterrupt,
+    ]
+
     def __init__(self, *, config_class: Callable = LitellmModelConfig, **kwargs):
         self.config = config_class(**kwargs)
         if self.config.litellm_model_registry and Path(self.config.litellm_model_registry).is_file():
             litellm.utils.register_model(json.loads(Path(self.config.litellm_model_registry).read_text()))
 
-    @retry(
-        reraise=True,
-        stop=stop_after_attempt(int(os.getenv("MSWEA_MODEL_RETRY_STOP_AFTER_ATTEMPT", "10"))),
-        wait=wait_exponential(multiplier=1, min=4, max=60),
-        before_sleep=before_sleep_log(logger, logging.WARNING),
-        retry=retry_if_not_exception_type(
-            (
-                litellm.exceptions.UnsupportedParamsError,
-                litellm.exceptions.NotFoundError,
-                litellm.exceptions.PermissionDeniedError,
-                litellm.exceptions.ContextWindowExceededError,
-                litellm.exceptions.APIError,
-                litellm.exceptions.AuthenticationError,
-                KeyboardInterrupt,
-            )
-        ),
-    )
     def _query(self, messages: list[dict[str, str]], **kwargs):
         try:
             return litellm.completion(
@@ -81,15 +70,20 @@ class LitellmModel:
             e.message += " You can permanently set your API key with `mini-extra config set KEY VALUE`."
             raise e
 
+    def _prepare_messages_for_api(self, messages: list[dict]) -> list[dict]:
+        prepared = [{k: v for k, v in msg.items() if k != "extra"} for msg in messages]
+        prepared = _reorder_anthropic_thinking_blocks(prepared)
+        return set_cache_control(prepared, mode=self.config.set_cache_control)
+
     def query(self, messages: list[dict[str, str]], **kwargs) -> dict:
-        if self.config.set_cache_control:  # anthropic only
-            messages = set_cache_control(messages, mode=self.config.set_cache_control)
-        response = self._query([{k: v for k, v in msg.items() if k != "extra"} for msg in messages], **kwargs)
+        for attempt in retry(logger=logger, abort_exceptions=self.abort_exceptions):
+            with attempt:
+                response = self._query(self._prepare_messages_for_api(messages), **kwargs)
         cost_output = self._calculate_cost(response)
         GLOBAL_MODEL_STATS.add(cost_output["cost"])
         message = response.choices[0].message.model_dump()
         message["extra"] = {
-            "actions": self.parse_actions(response),
+            "actions": self._parse_actions(response),
             "response": response.model_dump(),
             **cost_output,
             "timestamp": time.time(),
@@ -116,58 +110,26 @@ class LitellmModel:
                 raise RuntimeError(msg) from e
         return {"cost": cost}
 
-    def parse_actions(self, response: dict) -> list[dict]:
+    def _parse_actions(self, response: dict) -> list[dict]:
         """Parse actions from the model response. Raises FormatError if not exactly one action."""
         content = response.choices[0].message.content or ""
-        actions = [a.strip() for a in re.findall(self.config.action_regex, content, re.DOTALL)]
-        if len(actions) != 1:
-            raise FormatError(
-                {
-                    "role": "user",
-                    "content": Template(self.config.format_error_template, undefined=StrictUndefined).render(
-                        actions=actions
-                    ),
-                    "extra": {
-                        "interrupt_type": "FormatError",
-                        "n_actions": len(actions),
-                        "model_response": content,
-                    },
-                }
-            )
-        return [{"command": action} for action in actions]
+        return parse_regex_actions(
+            content, action_regex=self.config.action_regex, format_error_template=self.config.format_error_template
+        )
 
     def format_message(self, **kwargs) -> dict:
-        msg = dict(**kwargs)
-        if self.config.multimodal_regex:
-            msg = expand_multimodal_content(msg, self.config.multimodal_regex)
-        return msg
+        return expand_multimodal_content(kwargs, pattern=self.config.multimodal_regex)
 
     def format_observation_messages(
         self, message: dict, outputs: list[dict], template_vars: dict | None = None
     ) -> list[dict]:
         """Format execution outputs into observation messages."""
-        results = []
-        for output in outputs:
-            content = Template(self.config.observation_template, undefined=StrictUndefined).render(
-                output=output, **(template_vars or {})
-            )
-            results.append(
-                self.format_message(
-                    role="user",
-                    content=content,
-                    extra={
-                        "raw_output": output.get("output", ""),
-                        "returncode": output.get("returncode"),
-                        "timestamp": time.time(),
-                        **(
-                            {"exception_info": output["exception_info"]} | output.get("extra", {})
-                            if output.get("exception_info")
-                            else {}
-                        ),
-                    },
-                )
-            )
-        return results
+        return format_observation_messages(
+            outputs,
+            observation_template=self.config.observation_template,
+            template_vars=template_vars,
+            multimodal_regex=self.config.multimodal_regex,
+        )
 
     def get_template_vars(self, **kwargs) -> dict[str, Any]:
         return self.config.model_dump()

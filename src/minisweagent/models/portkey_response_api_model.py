@@ -1,23 +1,13 @@
 import logging
-import os
-import re
 import time
 
 import litellm
-from jinja2 import StrictUndefined, Template
-from tenacity import (
-    before_sleep_log,
-    retry,
-    retry_if_not_exception_type,
-    stop_after_attempt,
-    wait_exponential,
-)
 
-from minisweagent.exceptions import FormatError
 from minisweagent.models import GLOBAL_MODEL_STATS
 from minisweagent.models.portkey_model import PortkeyModel, PortkeyModelConfig
-from minisweagent.models.utils.cache_control import set_cache_control
-from minisweagent.models.utils.openai_response_api import coerce_responses_text
+from minisweagent.models.utils.actions_text import parse_regex_actions
+from minisweagent.models.utils.openai_response_api import _coerce_responses_text
+from minisweagent.models.utils.retry import retry
 
 logger = logging.getLogger("portkey_response_api_model")
 
@@ -31,13 +21,6 @@ class PortkeyResponseAPIModel(PortkeyModel):
         super().__init__(config_class=config_class, **kwargs)
         self._previous_response_id: str | None = None
 
-    @retry(
-        reraise=True,
-        stop=stop_after_attempt(int(os.getenv("MSWEA_MODEL_RETRY_STOP_AFTER_ATTEMPT", "10"))),
-        wait=wait_exponential(multiplier=1, min=4, max=60),
-        before_sleep=before_sleep_log(logger, logging.WARNING),
-        retry=retry_if_not_exception_type((KeyboardInterrupt, TypeError, ValueError)),
-    )
     def _query(self, messages: list[dict[str, str]], **kwargs):
         input_messages = messages if self._previous_response_id is None else messages[-1:]
         resp = self.client.responses.create(
@@ -50,42 +33,25 @@ class PortkeyResponseAPIModel(PortkeyModel):
         return resp
 
     def query(self, messages: list[dict[str, str]], **kwargs) -> dict:
-        if self.config.set_cache_control:
-            messages = set_cache_control(messages, mode=self.config.set_cache_control)
-        response = self._query(messages, **kwargs)
-        content = coerce_responses_text(response)
+        for attempt in retry(logger=logger, abort_exceptions=self.abort_exceptions):
+            with attempt:
+                response = self._query(self._prepare_messages_for_api(messages), **kwargs)
         cost_output = self._calculate_cost(response)
         GLOBAL_MODEL_STATS.add(cost_output["cost"])
-        return {
-            "role": "assistant",
-            "content": content,
-            "extra": {
-                "actions": self.parse_actions(response),
-                "response": response.model_dump() if hasattr(response, "model_dump") else {},
-                **cost_output,
-                "timestamp": time.time(),
-            },
+        message = response.model_dump() if hasattr(response, "model_dump") else dict(response)
+        message["extra"] = {
+            "actions": self._parse_actions(response),
+            **cost_output,
+            "timestamp": time.time(),
         }
+        return message
 
-    def parse_actions(self, response) -> list[dict]:
+    def _parse_actions(self, response) -> list[dict]:
         """Parse actions from the response API response. Uses coerce_responses_text for content extraction."""
-        content = coerce_responses_text(response)
-        actions = [a.strip() for a in re.findall(self.config.action_regex, content, re.DOTALL)]
-        if len(actions) != 1:
-            raise FormatError(
-                {
-                    "role": "user",
-                    "content": Template(self.config.format_error_template, undefined=StrictUndefined).render(
-                        actions=actions
-                    ),
-                    "extra": {
-                        "interrupt_type": "FormatError",
-                        "n_actions": len(actions),
-                        "model_response": content,
-                    },
-                }
-            )
-        return [{"command": action} for action in actions]
+        content = _coerce_responses_text(response)
+        return parse_regex_actions(
+            content, action_regex=self.config.action_regex, format_error_template=self.config.format_error_template
+        )
 
     def _calculate_cost(self, response) -> dict[str, float]:
         try:

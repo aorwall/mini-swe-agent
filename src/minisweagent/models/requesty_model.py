@@ -1,24 +1,18 @@
 import json
 import logging
 import os
-import re
 import time
-from typing import Any
+from typing import Any, Literal
 
 import requests
-from jinja2 import StrictUndefined, Template
 from pydantic import BaseModel
-from tenacity import (
-    before_sleep_log,
-    retry,
-    retry_if_not_exception_type,
-    stop_after_attempt,
-    wait_exponential,
-)
 
-from minisweagent.exceptions import FormatError
 from minisweagent.models import GLOBAL_MODEL_STATS
+from minisweagent.models.utils.actions_text import format_observation_messages, parse_regex_actions
+from minisweagent.models.utils.anthropic_utils import _reorder_anthropic_thinking_blocks
+from minisweagent.models.utils.cache_control import set_cache_control
 from minisweagent.models.utils.openai_multimodal import expand_multimodal_content
+from minisweagent.models.utils.retry import retry
 
 logger = logging.getLogger("requesty_model")
 
@@ -26,6 +20,8 @@ logger = logging.getLogger("requesty_model")
 class RequestyModelConfig(BaseModel):
     model_name: str
     model_kwargs: dict[str, Any] = {}
+    set_cache_control: Literal["default_end"] | None = None
+    """Set explicit cache control markers, for example for Anthropic models"""
     action_regex: str = r"```mswea_bash_command\s*\n(.*?)\n```"
     """Regex to extract the action from the LM's output."""
     format_error_template: str = (
@@ -60,23 +56,13 @@ class RequestyRateLimitError(Exception):
 
 
 class RequestyModel:
+    abort_exceptions: list[type[Exception]] = [RequestyAuthenticationError, KeyboardInterrupt]
+
     def __init__(self, **kwargs):
         self.config = RequestyModelConfig(**kwargs)
         self._api_url = "https://router.requesty.ai/v1/chat/completions"
         self._api_key = os.getenv("REQUESTY_API_KEY", "")
 
-    @retry(
-        reraise=True,
-        stop=stop_after_attempt(10),
-        wait=wait_exponential(multiplier=1, min=4, max=60),
-        before_sleep=before_sleep_log(logger, logging.WARNING),
-        retry=retry_if_not_exception_type(
-            (
-                RequestyAuthenticationError,
-                KeyboardInterrupt,
-            )
-        ),
-    )
     def _query(self, messages: list[dict[str, str]], **kwargs):
         headers = {
             "Authorization": f"Bearer {self._api_key}",
@@ -106,13 +92,20 @@ class RequestyModel:
         except requests.exceptions.RequestException as e:
             raise RequestyAPIError(f"Request failed: {e}") from e
 
+    def _prepare_messages_for_api(self, messages: list[dict]) -> list[dict]:
+        prepared = [{k: v for k, v in msg.items() if k != "extra"} for msg in messages]
+        prepared = _reorder_anthropic_thinking_blocks(prepared)
+        return set_cache_control(prepared, mode=self.config.set_cache_control)
+
     def query(self, messages: list[dict[str, str]], **kwargs) -> dict:
-        response = self._query([{k: v for k, v in msg.items() if k != "extra"} for msg in messages], **kwargs)
+        for attempt in retry(logger=logger, abort_exceptions=self.abort_exceptions):
+            with attempt:
+                response = self._query(self._prepare_messages_for_api(messages), **kwargs)
         cost_output = self._calculate_cost(response)
         GLOBAL_MODEL_STATS.add(cost_output["cost"])
         message = dict(response["choices"][0]["message"])
         message["extra"] = {
-            "actions": self.parse_actions(response),
+            "actions": self._parse_actions(response),
             "response": response,
             **cost_output,
             "timestamp": time.time(),
@@ -129,58 +122,26 @@ class RequestyModel:
             )
         return {"cost": cost}
 
-    def parse_actions(self, response: dict) -> list[dict]:
+    def _parse_actions(self, response: dict) -> list[dict]:
         """Parse actions from the model response. Raises FormatError if not exactly one action."""
         content = response["choices"][0]["message"]["content"] or ""
-        actions = [a.strip() for a in re.findall(self.config.action_regex, content, re.DOTALL)]
-        if len(actions) != 1:
-            raise FormatError(
-                {
-                    "role": "user",
-                    "content": Template(self.config.format_error_template, undefined=StrictUndefined).render(
-                        actions=actions
-                    ),
-                    "extra": {
-                        "interrupt_type": "FormatError",
-                        "n_actions": len(actions),
-                        "model_response": content,
-                    },
-                }
-            )
-        return [{"command": action} for action in actions]
+        return parse_regex_actions(
+            content, action_regex=self.config.action_regex, format_error_template=self.config.format_error_template
+        )
 
     def format_message(self, **kwargs) -> dict:
-        msg = dict(**kwargs)
-        if self.config.multimodal_regex:
-            msg = expand_multimodal_content(msg, self.config.multimodal_regex)
-        return msg
+        return expand_multimodal_content(kwargs, pattern=self.config.multimodal_regex)
 
     def format_observation_messages(
         self, message: dict, outputs: list[dict], template_vars: dict | None = None
     ) -> list[dict]:
         """Format execution outputs into observation messages."""
-        results = []
-        for output in outputs:
-            content = Template(self.config.observation_template, undefined=StrictUndefined).render(
-                output=output, **(template_vars or {})
-            )
-            results.append(
-                self.format_message(
-                    role="user",
-                    content=content,
-                    extra={
-                        "raw_output": output.get("output", ""),
-                        "returncode": output.get("returncode"),
-                        "timestamp": time.time(),
-                        **(
-                            {"exception_info": output["exception_info"]} | output.get("extra", {})
-                            if output.get("exception_info")
-                            else {}
-                        ),
-                    },
-                )
-            )
-        return results
+        return format_observation_messages(
+            outputs,
+            observation_template=self.config.observation_template,
+            template_vars=template_vars,
+            multimodal_regex=self.config.multimodal_regex,
+        )
 
     def get_template_vars(self, **kwargs) -> dict[str, Any]:
         return self.config.model_dump()
