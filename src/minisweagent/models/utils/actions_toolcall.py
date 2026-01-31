@@ -84,7 +84,7 @@ def format_toolcall_observation_messages(
         msg = {
             "content": content,
             "extra": {
-                "raw_output": output.get("output", ""),
+                "raw_output": output.get("output", "")[:500_000],
                 "returncode": output.get("returncode"),
                 "timestamp": time.time(),
                 "exception_info": output.get("exception_info"),

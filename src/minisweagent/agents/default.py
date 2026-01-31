@@ -119,6 +119,11 @@ class DefaultAgent:
     def execute_actions(self, message: dict) -> list[dict]:
         """Execute actions in message, add observation messages, return them."""
         outputs = [self.env.execute(action) for action in message.get("extra", {}).get("actions", [])]
+        threshold = getattr(getattr(self.model, "config", None), "output_file_threshold", 0)
+        if threshold > 0:
+            from minisweagent.models.utils.output_utils import process_large_output
+
+            outputs = [process_large_output(output, threshold, environment=self.env) for output in outputs]
         return self.add_messages(*self.model.format_observation_messages(message, outputs, self.get_template_vars()))
 
     def serialize(self, *extra_dicts) -> dict:

@@ -1,0 +1,18 @@
+# Observation template override: file-based output for large results
+# Use with: -c swebench.yaml -c swebench_file.yaml
+model:
+  output_file_threshold: 150
+  observation_template: |
+    {%- if output.exception_info %}Exception: {{ output.exception_info }}
+    {% endif -%}
+    {%- if output.output_line_count is defined -%}
+    {%- if output.output_file_path is defined -%}
+    [Showing last 50 of {{ output.output_line_count }} lines. Full output: {{ output.output_file_path }}]
+    {%- else -%}
+    [Showing last 50 of {{ output.output_line_count }} lines]
+    {%- endif -%}
+    {{ output.output }}
+    {%- else -%}
+    {{ output.output }}
+    {%- endif -%}
+    [{{ output.output.split("\n") | length }} lines, exit code {{ output.returncode }}]

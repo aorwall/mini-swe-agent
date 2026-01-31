@@ -37,6 +37,8 @@ class OpenRouterModelConfig(BaseModel):
     """Template used to render the observation after executing an action."""
     multimodal_regex: str = ""
     """Regex to extract multimodal content. Empty string disables multimodal processing."""
+    output_file_threshold: int = 0
+    """When output exceeds this many lines, save to /tmp file and return path. 0 = disabled."""
 
 
 class OpenRouterAPIError(Exception):
