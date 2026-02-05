@@ -93,8 +93,7 @@ class LitellmModel:
         return message
 
     def _calculate_cost(self, response) -> dict[str, float]:
-        # Prefer API-reported cost if available (e.g., OpenRouter includes accurate cost
-        # that accounts for cached tokens, which litellm's calculator doesn't handle)
+        # Prefer API-reported cost if available
         if hasattr(response, "usage") and response.usage is not None:
             api_cost = getattr(response.usage, "cost", None)
             if isinstance(api_cost, (int, float)) and api_cost > 0:
